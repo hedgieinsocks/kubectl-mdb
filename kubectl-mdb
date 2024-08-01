@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+
+[[ -n "${DEBUG}" ]] && set -x
+set -eo pipefail
+
+KMDB_NAMESPACE="${KMDB_NAMESPACE:-default}"
+
+### show help message and exit
+# arg: none
+show_help() {
+  cat << EOF | colorize "man"
+kubectl mdb helps interact with mariadb-operator 2-replica semi-sync clusters
+
+Usage:
+  kubectl mdb <command> <arg> [-n <string>] [-h]
+
+Available Commands:
+  list|ls                    list clusters and pods
+
+  enter|ent <pod>            enter a mariadb pod
+  mysql|sql <pod>            launch mysql shell
+  proc|pr <pod>              show mysql processlist
+  disk|du <pod>              show database disk usage
+
+  status|st <mariadb>        show cluster status
+  repl|rpl <mariadb>         check slave replication
+  trans|tr <mariadb>         skip errant transactions
+  failover|fail <mariadb>    trigger master failover
+
+Flags:
+  -n, --namespace string     set namespace scope
+  -h, --help                 show this message
+EOF
+  exit
+}
+
+### ensure that dependencies are installed
+# arg: none
+check_requirements() {
+  hash jq yq || err "some dependencies are missing"
+}
+
+### colorize the input
+# arg: $1 - linter format
+colorize() {
+  if hash bat 2>/dev/null; then
+    bat -pp --language "$1"
+  else
+    cat
+  fi
+}
+
+### show error message and exit
+# arg: $1 - text
+err() {
+  echo "🮲 error: $1" >&2
+  exit 1
+}
+
+### parse and validate the input
+# arg: $@ - arguments
+# set: COMMAND, KMDB_NAMESPACE, TARGET
+parse_input() {
+  case "$1" in
+    list|ls|enter|ent|mysql|sql|proc|pr|disk|du|status|st|repl|rpl|trans|tr|failover|fail) COMMAND="$1"; shift ;;
+    *)                                                                                     show_help           ;;
+  esac
+
+  while (( "$#" )); do
+    case "$1" in
+      -n|--namespace) if [[ -n "$2" ]] && [[ "${2:0:1}" != "-" ]]; then
+                        KMDB_NAMESPACE="$2"; shift 2
+                      else
+                        err "option $1 requires an argument"
+                      fi
+                      ;;
+      -h|--help)      show_help
+                      ;;
+      -*|--*)         err "invalid option: $1"
+                      ;;
+      *)              if [[ -z "${TARGET}" ]]; then
+                        TARGET="$1"; shift
+                      else
+                        err "multiple targets provided"
+                      fi
+                      ;;
+    esac
+  done
+
+  [[ -n "${TARGET}" || "${COMMAND}" == "ls" ]] || err "no target provided"
+}
+
+### obtain, parse and validate a mariadb CR
+# arg: none
+# set: CLUSTER_OBJ, CLUSTER_STATUS, DECLARED_MASTER_INDEX, CURRENT_MASTER_INDEX, CURRENT_SLAVE_INDEX, MASTER_POD, SLAVE_POD
+get_mariadb_cluster() {
+  local replicas
+
+  CLUSTER_OBJ=$(kubectl --namespace "${KMDB_NAMESPACE}" get mariadb "${TARGET}" --output json)
+
+  replicas=$(jq --raw-output '.spec.replicas' <<< "${CLUSTER_OBJ}")
+  [[ "${replicas}" -eq 2 ]] || err "this is not a 2-replica semi-sync cluster"
+
+  CLUSTER_STATUS=$(yq --yaml-output '.spec.replication.primary, .status' <<< "${CLUSTER_OBJ}" | sed '/---/d')
+
+  DECLARED_MASTER_INDEX=$(jq --raw-output '.spec.replication.primary.podIndex' <<< "${CLUSTER_OBJ}")
+  CURRENT_MASTER_INDEX=$(jq --raw-output '.status.currentPrimaryPodIndex' <<< "${CLUSTER_OBJ}")
+
+  case "${CURRENT_MASTER_INDEX}" in
+    0) CURRENT_SLAVE_INDEX=1  ;;
+    1) CURRENT_SLAVE_INDEX=0  ;;
+  esac
+
+  MASTER_POD="${TARGET}-${CURRENT_MASTER_INDEX}"
+  SLAVE_POD="${TARGET}-${CURRENT_SLAVE_INDEX}"
+}
+
+### run a shell command in a mariadb pod
+# arg: $1 - pod
+#      ${@:2) - command
+exec_pod() {
+  kubectl --namespace "${KMDB_NAMESPACE}" exec --stdin --tty --container mariadb "$1" -- "${@:2}"
+}
+
+### run a sql query in a mariadb pod
+# arg: $2 - pod
+#      $2 - sql query
+run_sql() {
+  exec_pod "$1" sh -c "mariadb -u root -p\${MARIADB_ROOT_PASSWORD} --execute '$2'"
+}
+
+### show mariadb CRs and their pods
+# arg: none
+list_mariadb_resources() {
+  kubectl --namespace "${KMDB_NAMESPACE}" get mariadb | colorize "VimHelp"
+  echo
+  kubectl --namespace "${KMDB_NAMESPACE}" get pod --selector app.kubernetes.io/name=mariadb | colorize "VimHelp"
+}
+
+### start an interactive bash shell in a mariadb pod
+# arg: none
+enter_mariadb_pod() {
+  exec_pod "${TARGET}" "bash"
+}
+
+### start an interactive mysql shell in a mariadb pod
+# arg: none
+launch_mysql_console() {
+  exec_pod "${TARGET}" sh -c "mariadb -u root -p\${MARIADB_ROOT_PASSWORD}"
+}
+
+### show mysql processes in a mariadb pod
+# arg: none
+show_mysql_proc() {
+  run_sql "${TARGET}" "SHOW PROCESSLIST;"
+}
+
+### list databases sorted by disk usgage
+# arg: none
+show_disk_usage() {
+  exec_pod "${TARGET}" sh -c "find /var/lib/mysql/ -maxdepth 1 -type d ! -name 'lost+found' -exec du -sh {} \; | sort -rh | awk -F/ '{print \$1, \$5}'"
+}
+
+### get mariadb CR status
+# arg: none
+show_cluster_status() {
+  get_mariadb_cluster
+  echo "${CLUSTER_STATUS}" | colorize "yaml"
+}
+
+### get replication status of a mariadb slave pod
+# arg: none
+show_replication_status() {
+  get_mariadb_cluster
+  run_sql "${SLAVE_POD}" 'SHOW SLAVE "mariadb-operator" STATUS\G' \
+    | awk '/Seconds_Behind_Master|Slave_IO|Slave_SQL|Last_SQL_Error/ {print $1, $2}' | sort | colorize "yaml"
+}
+
+### enter empty transactions in a mariadb slave pod
+# arg: none
+skip_errant_transactions() {
+  local last_transaction_id transcation_id
+
+  get_mariadb_cluster
+
+  last_transaction_id=0
+  while true; do
+    transcation_id=$(run_sql "${SLAVE_POD}" 'SHOW SLAVE "mariadb-operator" STATUS\G' \
+      | grep 'Last_SQL_Error' \
+      | grep -Eo '[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{12}:[0-9]{1,100}' || true)
+    if [[ -n "${transcation_id}" ]]; then
+      if [[ "${last_transaction_id}" == "${transcation_id}" ]]; then
+        echo "🮲 completed: no errant transactions found"
+        break
+      fi
+      last_transaction_id="${transcation_id}"
+      echo "⛌ skip: $transcation_id"
+      run_sql "${SLAVE_POD}" "STOP SLAVE; SET GTID_NEXT='${transcation_id}'; BEGIN; COMMIT; SET GTID_NEXT='AUTOMATIC'; START SLAVE;"
+      sleep 1
+    else
+      echo "🮲 completed: no errant transactions found"
+      break
+    fi
+  done
+}
+
+### perform a manual master pod switchover
+# arg: none
+failover_master() {
+  local confirm
+
+  get_mariadb_cluster
+
+  if [[ "${DECLARED_MASTER_INDEX}" -ne "${CURRENT_MASTER_INDEX}" ]]; then
+    echo "${CLUSTER_STATUS}" | colorize "yaml"
+    err "mismatch between the declared and current master pod indexes"
+  fi
+
+  echo -n "⦿ confirm: type 'yes' to promote slave pod '${SLAVE_POD}' to master: "
+  read -r confirm
+  if [[ "${confirm}" != "yes" ]]; then
+    err "confirmation failed"
+  fi
+
+  kubectl --namespace "${KMDB_NAMESPACE}" patch mariadb "${TARGET}" --type json \
+    --patch='[{"op": "replace", "path": "/spec/replication/primary/podIndex", "value": '${CURRENT_SLAVE_INDEX}'}]'
+}
+
+main() {
+  check_requirements
+  parse_input "$@"
+  case "${COMMAND}" in
+    list|ls)       list_mariadb_resources   ;;
+    enter|ent)     enter_mariadb_pod        ;;
+    mysql|sql)     launch_mysql_console     ;;
+    proc|pr)       show_mysql_proc          ;;
+    disk|du)       show_disk_usage          ;;
+    status|st)     show_cluster_status      ;;
+    repl|rpl)      show_replication_status  ;;
+    trans|tr)      skip_errant_transactions ;;
+    failover|fail) failover_master          ;;
+  esac
+}
+
+main "$@"
