@@ -1,6 +1,6 @@
 # kubectl-mdb
 
-`kubectl-mdb` is a simple `kubectl` plugin that helps interact with [mariadb-operator](https://github.com/mariadb-operator) 2-replica semi-sync clusters.
+`kubectl-mdb` is a simple `kubectl` plugin that helps interact with [mariadb-operator](https://github.com/mariadb-operator) semi-sync replication clusters.
 
 _This project is not affiliated with MariaDB._
 
@@ -24,25 +24,24 @@ You can export the following variables to tweak the plugin's behaviour.
 ## Usage
 
 ```
-kubectl mdb helps interact with mariadb-operator 2-replica semi-sync clusters
+kubectl mdb helps interact with mariadb-operator semi-sync replication clusters
 
 Usage:
-  kubectl mdb <command> <arg> [-n <string>] [-h]
+  kubectl mdb <command>
 
 Available Commands:
-  list|ls                    list clusters and pods
-
+  list|ls                    list mariadbs and pods
+  status|st <mariadb>        show mariadb status
   enter|ent <pod>            enter a mariadb pod
   mysql|sql <pod>            launch mysql shell
   proc|pr <pod>              show mysql processlist
-  disk|du <pod>              show database disk usage
-
-  status|st <mariadb>        show cluster status
-  repl|rpl <mariadb>         check slave replication
-  trans|tr <mariadb>         skip errant transactions
-  failover|fail <mariadb>    trigger master failover
+  disk|du <pod>              calculate database disk usage
+  repl|rpl <replica>         check replication status
+  trans|tr <replica>         skip errant transactions
+  promote|prom <replica>     promote replica to primary
 
 Flags:
   -n, --namespace string     set namespace scope
+  -v, --version              show plugin version
   -h, --help                 show this message
 ```
