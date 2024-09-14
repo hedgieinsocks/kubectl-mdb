@@ -3,7 +3,7 @@
 [[ -n "${DEBUG}" ]] && set -x
 set -eo pipefail
 
-VERSION="0.0.2"
+VERSION="0.0.3"
 
 KMDB_NAMESPACE="${KMDB_NAMESPACE:-default}"
 
@@ -204,7 +204,7 @@ show_replication_status() {
   get_mariadb_cluster "${TARGET%-[0-9]}"
   assert_target_is_replica
   run_sql "${TARGET}" 'SHOW REPLICA "mariadb-operator" STATUS\G' \
-    | awk '/Seconds_Behind_Master|Slave_IO|Slave_SQL|Last_SQL_Error/ {print $1, $2}' | sort | colorize "yaml"
+    | awk '/Master_Host|Seconds_Behind_Master|Slave_IO|Slave_SQL|Last_SQL_Error/ {$1=$1; print}' | sort | colorize "yaml"
 }
 
 ### enter empty transactions in a mariadb replica pod
