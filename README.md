@@ -30,15 +30,16 @@ Usage:
   kubectl mdb <command>
 
 Available Commands:
-  list|ls                    list mariadbs and pods
-  status|st <mariadb>        show mariadb status
-  enter|ent <pod>            enter a mariadb pod
-  mysql|sql <pod>            launch mysql shell
-  proc|pr <pod>              show mysql processlist
-  disk|du <pod>              calculate database disk usage
-  repl|rpl <replica>         check replication status
-  trans|tr <replica>         skip errant transactions
-  promote|prom <replica>     promote replica to primary
+  list [<mariadb>]     list mariadbs and pods
+  top [<pod>]          display resource usage
+  status <mariadb>     show mariadb status
+  enter <pod>          enter a mariadb pod
+  mysql <pod>          launch mysql shell
+  proc <pod>           print mysql processlist
+  disk <pod>           calculate database disk usage
+  repl <replica>       check replication status
+  tran <replica>       skip errant transactions
+  prom <replica>       promote replica to primary
 
 Flags:
   -n, --namespace string     set namespace scope

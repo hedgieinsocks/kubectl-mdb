@@ -3,7 +3,7 @@
 [[ -n "${DEBUG}" ]] && set -x
 set -eo pipefail
 
-VERSION="0.0.3"
+VERSION="0.0.4"
 
 KMDB_NAMESPACE="${KMDB_NAMESPACE:-default}"
 
@@ -17,15 +17,16 @@ Usage:
   kubectl mdb <command>
 
 Available Commands:
-  list|ls                    list mariadbs and pods
-  status|st <mariadb>        show mariadb status
-  enter|ent <pod>            enter a mariadb pod
-  mysql|sql <pod>            launch mysql shell
-  proc|pr <pod>              show mysql processlist
-  disk|du <pod>              calculate database disk usage
-  repl|rpl <replica>         check replication status
-  trans|tr <replica>         skip errant transactions
-  promote|prom <replica>     promote replica to primary
+  list [<mariadb>]     list mariadbs and pods
+  top [<pod>]          display resource usage
+  status <mariadb>     show mariadb status
+  enter <pod>          enter a mariadb pod
+  mysql <pod>          launch mysql shell
+  proc <pod>           print mysql processlist
+  disk <pod>           calculate database disk usage
+  repl <replica>       check replication status
+  tran <replica>       skip errant transactions
+  prom <replica>       promote replica to primary
 
 Flags:
   -n, --namespace string     set namespace scope
@@ -39,7 +40,7 @@ EOF
 # arg: none
 show_version() {
   echo "kubectl mdb version v${VERSION}"
-  exit
+  exit 0
 }
 
 ### ensure that dependencies are installed
@@ -85,10 +86,10 @@ parse_input() {
                       ;;
       *)              if [[ -z "${COMMAND}" ]]; then
                         case "$1" in
-                          list|ls|enter|ent|mysql|sql| \
-                          proc|pr|disk|du|status|st| \
-                          repl|rpl|trans|tr|promote|prom) COMMAND="$1"; shift       ;;
-                          *)                              err "invalid command: $1" ;;
+                          list|top|enter|mysql| \
+                          proc|disk|status|repl| \
+                          tran|prom)               COMMAND="$1"; shift       ;;
+                          *)                       err "invalid command: $1" ;;
                         esac
                       else
                         if [[ -z "${TARGET}" ]]; then
@@ -101,7 +102,7 @@ parse_input() {
     esac
   done
   [[ -n "${COMMAND}" ]] || err "no command provided"
-  [[ -n "${TARGET}" || "${COMMAND}" == "ls" ]] || err "no target provided"
+  [[ -n "${TARGET}" || "${COMMAND}" =~ ^(list|top)$ ]] || err "no target provided"
 }
 
 ### ensure that target pod is a replica
@@ -157,9 +158,23 @@ run_sql() {
 ### show mariadb CRs and their pods
 # arg: none
 list_mariadb_resources() {
-  kubectl --namespace "${KMDB_NAMESPACE}" get mariadb --ignore-not-found | colorize "VimHelp"
+  kubectl --namespace "${KMDB_NAMESPACE}" get mariadb --ignore-not-found \
+    | awk "NR == 1 || \$1 ~ /${TARGET:-.}/" \
+    | colorize "VimHelp"
   echo
-  kubectl --namespace "${KMDB_NAMESPACE}" get pod --selector app.kubernetes.io/name=mariadb --ignore-not-found --output wide | colorize "VimHelp"
+  kubectl --namespace "${KMDB_NAMESPACE}" get pod --selector app.kubernetes.io/name=mariadb --ignore-not-found --output wide \
+    | awk "NR == 1 || \$1 ~ /${TARGET:-.}/" \
+    | colorize "VimHelp"
+}
+
+### show cpu and ram usage of mariadb pods
+# arg: none
+top_mariadb_pods() {
+  kubectl --namespace "${KMDB_NAMESPACE}" top pod --selector app.kubernetes.io/name=mariadb --containers \
+    | sed 's/(cores)\|(bytes)//g' \
+    | column -t \
+    | awk "NR == 1 || \$1 ~ /${TARGET:-.}/" \
+    | colorize "VimHelp"
 }
 
 ### start an interactive bash shell in a mariadb pod
@@ -203,6 +218,7 @@ show_replication_status() {
   get_mariadb_pod
   get_mariadb_cluster "${TARGET%-[0-9]}"
   assert_target_is_replica
+  run_sql "${TARGET}" 'SHOW VARIABLES LIKE "rpl_semi_sync_slave_enabled";' | grep --quiet ON || err "semi-sync replication is disabled on this pod"
   run_sql "${TARGET}" 'SHOW REPLICA "mariadb-operator" STATUS\G' \
     | awk '/Master_Host|Seconds_Behind_Master|Slave_IO|Slave_SQL|Last_SQL_Error/ {$1=$1; print}' | sort | colorize "yaml"
 }
@@ -266,15 +282,16 @@ main() {
   check_requirements
   parse_input "$@"
   case "${COMMAND}" in
-    list|ls)       list_mariadb_resources   ;;
-    enter|ent)     enter_mariadb_pod        ;;
-    mysql|sql)     launch_mysql_console     ;;
-    proc|pr)       show_mysql_proc          ;;
-    disk|du)       show_disk_usage          ;;
-    status|st)     show_cluster_status      ;;
-    repl|rpl)      show_replication_status  ;;
-    trans|tr)      skip_errant_transactions ;;
-    promote|prom)  promote_replica          ;;
+    list)      list_mariadb_resources   ;;
+    top)       top_mariadb_pods         ;;
+    enter)     enter_mariadb_pod        ;;
+    mysql)     launch_mysql_console     ;;
+    proc)      show_mysql_proc          ;;
+    disk)      show_disk_usage          ;;
+    status)    show_cluster_status      ;;
+    repl)      show_replication_status  ;;
+    tran)      skip_errant_transactions ;;
+    prom)      promote_replica          ;;
   esac
 }
 
